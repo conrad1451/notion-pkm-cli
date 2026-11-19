@@ -32,6 +32,38 @@ def _tag_contains(tags_property: str, tag: str) -> dict:
 def _tag_not_contains(tags_property: str, tag: str) -> dict:
     return {"property": tags_property, "multi_select": {"does_not_contain": tag}}
 
+def _build_date_filter(date_filter: dict | None) -> dict | None:
+    """
+    Convert a date filter specification into a Notion timestamp filter object.
+
+    Expected `date_filter` keys:
+      - field: "created_time" | "last_edited_time"
+      - op: "on_or_after" | "on_or_before" | "between"
+      - start: ISO-8601 string (for "on_or_after" and "between")
+      - end: ISO-8601 string (for "on_or_before" and "between")
+    """
+    if not date_filter:
+        return None
+
+    field = date_filter["field"]
+    op = date_filter["op"]
+
+    if op == "on_or_after":
+        condition = {"on_or_after": date_filter["start"]}
+    elif op == "on_or_before":
+        condition = {"on_or_before": date_filter["end"]}
+    elif op == "between":
+        condition = {
+            "on_or_after": date_filter["start"],
+            "on_or_before": date_filter["end"],
+        }
+    else:
+        raise ValueError(f"Unsupported date filter operator: {op}")
+
+    return {
+        "timestamp": field,
+        field: condition,
+    }
 
 # ---------------------------------------------------------------------------
 # Subgroup → Notion filter
@@ -163,10 +195,15 @@ def build_filters(selected_tag_group: set, tags_property: str) -> list:
     return [{"and": [_tag_contains(tags_property, tag) for tag in selected_tag_group]}]
 
 
+def build_timestamp_filter(field: str, condition: dict) -> dict:
+    """Build a top-level Notion timestamp filter for created_time or last_edited_time."""
+    if field not in {"created_time", "last_edited_time"}:
+        raise ValueError(f"Unsupported Notion timestamp field: {field}")
+    return {"timestamp": field, field: condition}
+
 # ---------------------------------------------------------------------------
 # Top-level filter builder
 # ---------------------------------------------------------------------------
-
 
 def build_notion_filter(
     selected_tag_group: set,
@@ -174,23 +211,11 @@ def build_notion_filter(
     title_filter: str,
     tags_property: str,
     title_prop: str,
+    date_filter: dict | None = None,
 ) -> dict:
     """
-    Combines subgroup (or flat tag) filters and title filter into one
-    Notion API filter object.
-
-    If subgroups are defined, uses subgroup chain logic.
-    Otherwise falls back to the flat AND-all-tags logic.
-
-    Args:
-        selected_tag_group: All tags chosen during browsing (used for flat fallback).
-        subgroups: Subgroup definitions (may be empty).
-        title_filter: Text to search for in page titles.
-        tags_property: Property name for the tags multi_select field.
-        title_prop: Property name for the title field.
-
-    Returns:
-        A Notion filter dict ready to pass to databases.query().
+    Combines subgroup (or flat tag) filters, title filter, and optional
+    created/last-edited timestamp filter into one Notion API filter object.
     """
     filters = []
 
@@ -204,13 +229,15 @@ def build_notion_filter(
     if title_filter:
         filters.append({"property": title_prop, "title": {"contains": title_filter}})
 
+    ts_filter = _build_date_filter(date_filter)
+    if ts_filter:
+        filters.append(ts_filter)
+
     if not filters:
         return {}
     if len(filters) == 1:
         return filters[0]
     return {"and": filters}
-
-
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -221,6 +248,7 @@ def log_search_params(
     selected_tag_group: set,
     subgroups: list[dict],
     title_filter: str,
+    date_filter: dict | None = None,
 ):
     """Log search parameters to the terminal."""
     if subgroups:
@@ -235,17 +263,23 @@ def log_search_params(
             )
             if i < len(subgroups) - 1:
                 click.echo(f"        ── {sg['operator_after']} ──")
-    else:
+    elif selected_tag_group:
         tags_list = sorted(selected_tag_group)
         click.echo(f"\n🔎 Searching Notion for: {', '.join(tags_list)}")
         click.echo(f"   Include tags: {', '.join(tags_list)}")
+    else:
+        click.echo("\n🔎 Searching Notion:")
 
     if title_filter:
         click.echo(f"   Title contains: '{title_filter}'")
 
+    if date_filter:
+        label = date_filter.get("display") or (
+            f"{date_filter['field']} ({date_filter['op']})"
+        )
+        click.echo(f"   Date filter: {label}")
+
     click.echo("...")
-
-
 # ---------------------------------------------------------------------------
 # Main search executor
 # ---------------------------------------------------------------------------
@@ -257,6 +291,7 @@ def perform_notion_search(
     subgroups: list[dict],
     title_filter: str,
     tags_property: str,
+    date_filter: dict | None = None,
 ):
     """
     Compiles all filters and executes the Notion database query.
@@ -268,15 +303,20 @@ def perform_notion_search(
         title_filter: Text to search for in titles.
         tags_property: Property name for tags.
     """
-    if not selected_tag_group and not title_filter:
-        click.echo("No tags or title selected.")
+    if not selected_tag_group and not title_filter and not date_filter:
+        click.echo("No tags, title, or date filter selected.")
         return
 
-    log_search_params(selected_tag_group, subgroups, title_filter)
+    log_search_params(selected_tag_group, subgroups, title_filter, date_filter)
 
     title_prop = get_title_property_name(db["id"])
     notion_filter = build_notion_filter(
-        selected_tag_group, subgroups, title_filter, tags_property, title_prop
+        selected_tag_group,
+        subgroups,
+        title_filter,
+        tags_property,
+        title_prop,
+        date_filter=date_filter,
     )
 
     if not notion_filter:

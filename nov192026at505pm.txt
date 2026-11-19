@@ -1,0 +1,392 @@
+diff --git a/actions/navigation.py b/actions/navigation.py
+index 4c45eed..dc77a76 100644
+--- a/actions/navigation.py
++++ b/actions/navigation.py
+@@ -1,4 +1,4 @@
+-# core/navigation.py
++# actions/navigation.py
+ """Interactive tag and filter navigation for Notion database searches.
+ 
+ Provides utilities for building hierarchical tag selection interfaces, managing
+@@ -12,6 +12,7 @@ import click
+ from client import KEYS_EXPANDED, load_tag_hierarchy
+ 
+ from utils.formatting import pick_from_list, pick_multi_from_list
++from utils.date_search import action_search_by_date
+ from core.search import perform_notion_search
+ from core.database import get_tags_property_name
+ 
+@@ -621,3 +622,11 @@ def action_search_multi_tags(db):
+             title_filter,
+             tags_property,
+         )
++
++
++
++
++# ---------------------------------------------------------------------------
++# Date Filter  
++# ---------------------------------------------------------------------------
++
+diff --git a/core/search.py b/core/search.py
+index fcfe3cf..eb71a20 100644
+--- a/core/search.py
++++ b/core/search.py
+@@ -32,6 +32,38 @@ def _tag_contains(tags_property: str, tag: str) -> dict:
+ def _tag_not_contains(tags_property: str, tag: str) -> dict:
+     return {"property": tags_property, "multi_select": {"does_not_contain": tag}}
+ 
++def _build_date_filter(date_filter: dict | None) -> dict | None:
++    """
++    Convert a date filter specification into a Notion timestamp filter object.
++
++    Expected `date_filter` keys:
++      - field: "created_time" | "last_edited_time"
++      - op: "on_or_after" | "on_or_before" | "between"
++      - start: ISO-8601 string (for "on_or_after" and "between")
++      - end: ISO-8601 string (for "on_or_before" and "between")
++    """
++    if not date_filter:
++        return None
++
++    field = date_filter["field"]
++    op = date_filter["op"]
++
++    if op == "on_or_after":
++        condition = {"on_or_after": date_filter["start"]}
++    elif op == "on_or_before":
++        condition = {"on_or_before": date_filter["end"]}
++    elif op == "between":
++        condition = {
++            "on_or_after": date_filter["start"],
++            "on_or_before": date_filter["end"],
++        }
++    else:
++        raise ValueError(f"Unsupported date filter operator: {op}")
++
++    return {
++        "timestamp": field,
++        field: condition,
++    }
+ 
+ # ---------------------------------------------------------------------------
+ # Subgroup → Notion filter
+@@ -163,34 +195,27 @@ def build_filters(selected_tag_group: set, tags_property: str) -> list:
+     return [{"and": [_tag_contains(tags_property, tag) for tag in selected_tag_group]}]
+ 
+ 
++def build_timestamp_filter(field: str, condition: dict) -> dict:
++    """Build a top-level Notion timestamp filter for created_time or last_edited_time."""
++    if field not in {"created_time", "last_edited_time"}:
++        raise ValueError(f"Unsupported Notion timestamp field: {field}")
++    return {"timestamp": field, field: condition}
++
+ # ---------------------------------------------------------------------------
+ # Top-level filter builder
+ # ---------------------------------------------------------------------------
+ 
+-
+ def build_notion_filter(
+     selected_tag_group: set,
+     subgroups: list[dict],
+     title_filter: str,
+     tags_property: str,
+     title_prop: str,
++    date_filter: dict | None = None,
+ ) -> dict:
+     """
+-    Combines subgroup (or flat tag) filters and title filter into one
+-    Notion API filter object.
+-
+-    If subgroups are defined, uses subgroup chain logic.
+-    Otherwise falls back to the flat AND-all-tags logic.
+-
+-    Args:
+-        selected_tag_group: All tags chosen during browsing (used for flat fallback).
+-        subgroups: Subgroup definitions (may be empty).
+-        title_filter: Text to search for in page titles.
+-        tags_property: Property name for the tags multi_select field.
+-        title_prop: Property name for the title field.
+-
+-    Returns:
+-        A Notion filter dict ready to pass to databases.query().
++    Combines subgroup (or flat tag) filters, title filter, and optional
++    created/last-edited timestamp filter into one Notion API filter object.
+     """
+     filters = []
+ 
+@@ -204,13 +229,15 @@ def build_notion_filter(
+     if title_filter:
+         filters.append({"property": title_prop, "title": {"contains": title_filter}})
+ 
++    ts_filter = _build_date_filter(date_filter)
++    if ts_filter:
++        filters.append(ts_filter)
++
+     if not filters:
+         return {}
+     if len(filters) == 1:
+         return filters[0]
+     return {"and": filters}
+-
+-
+ # ---------------------------------------------------------------------------
+ # Logging
+ # ---------------------------------------------------------------------------
+@@ -221,6 +248,7 @@ def log_search_params(
+     selected_tag_group: set,
+     subgroups: list[dict],
+     title_filter: str,
++    date_filter: dict | None = None,
+ ):
+     """Log search parameters to the terminal."""
+     if subgroups:
+@@ -235,17 +263,23 @@ def log_search_params(
+             )
+             if i < len(subgroups) - 1:
+                 click.echo(f"        ── {sg['operator_after']} ──")
+-    else:
++    elif selected_tag_group:
+         tags_list = sorted(selected_tag_group)
+         click.echo(f"\n🔎 Searching Notion for: {', '.join(tags_list)}")
+         click.echo(f"   Include tags: {', '.join(tags_list)}")
++    else:
++        click.echo("\n🔎 Searching Notion:")
+ 
+     if title_filter:
+         click.echo(f"   Title contains: '{title_filter}'")
+ 
+-    click.echo("...")
+-
++    if date_filter:
++        label = date_filter.get("display") or (
++            f"{date_filter['field']} ({date_filter['op']})"
++        )
++        click.echo(f"   Date filter: {label}")
+ 
++    click.echo("...")
+ # ---------------------------------------------------------------------------
+ # Main search executor
+ # ---------------------------------------------------------------------------
+@@ -257,6 +291,7 @@ def perform_notion_search(
+     subgroups: list[dict],
+     title_filter: str,
+     tags_property: str,
++    date_filter: dict | None = None,
+ ):
+     """
+     Compiles all filters and executes the Notion database query.
+@@ -268,15 +303,20 @@ def perform_notion_search(
+         title_filter: Text to search for in titles.
+         tags_property: Property name for tags.
+     """
+-    if not selected_tag_group and not title_filter:
+-        click.echo("No tags or title selected.")
++    if not selected_tag_group and not title_filter and not date_filter:
++        click.echo("No tags, title, or date filter selected.")
+         return
+ 
+-    log_search_params(selected_tag_group, subgroups, title_filter)
++    log_search_params(selected_tag_group, subgroups, title_filter, date_filter)
+ 
+     title_prop = get_title_property_name(db["id"])
+     notion_filter = build_notion_filter(
+-        selected_tag_group, subgroups, title_filter, tags_property, title_prop
++        selected_tag_group,
++        subgroups,
++        title_filter,
++        tags_property,
++        title_prop,
++        date_filter=date_filter,
+     )
+ 
+     if not notion_filter:
+diff --git a/main.py b/main.py
+index d8bcdce..9c3144e 100644
+--- a/main.py
++++ b/main.py
+@@ -5,7 +5,11 @@
+ import click
+ from client import load_databases
+ from actions.crud import action_read, action_create, action_search, action_append
+-from actions.navigation import pick_from_list, action_search_multi_tags
++from actions.navigation import (
++    pick_from_list,
++    action_search_multi_tags,
++    action_search_by_date,
++)
+ from core.database import show_db_properties
+ 
+ # Constants for shortcut keys
+@@ -14,6 +18,7 @@ KEYS = "123456789abcdefghijklmnopqrstuvwxyz"
+ COMMANDS = [
+     {"label": "Search pages", "fn": action_search},
+     {"label": "Search by multiple tags", "fn": action_search_multi_tags},
++    {"label": "Search by created / edited date", "fn": action_search_by_date},
+     {"label": "Read page by ID", "fn": action_read},
+     {"label": "Create page", "fn": action_create},
+     {"label": "Append to page", "fn": action_append},
+diff --git a/utils/date_search.py b/utils/date_search.py
+new file mode 100644
+index 0000000..696b8fc
+--- /dev/null
++++ b/utils/date_search.py
+@@ -0,0 +1,157 @@
++# utils/date_search.py
++
++from datetime import datetime, time, timezone
++import click
++from notion_client import APIResponseError
++
++from client import notion, KEYS_EXPANDED
++from utils.formatting import pick_from_list, browse_pages
++
++DATE_MODES = [
++    {"label": "Created date", "field": "created_time"},
++    {"label": "Last edited date", "field": "last_edited_time"},
++]
++
++RANGE_MODES = [
++    {"label": "On or after date", "op": "on_or_after"},
++    {"label": "On or before date", "op": "on_or_before"},
++    {"label": "Between two dates (inclusive)", "op": "between"},
++]
++
++
++def _parse_date_to_iso(date_str: str, end_of_day: bool = False) -> str:
++    """Convert YYYY-MM-DD input into an ISO-8601 UTC string."""
++    parsed = datetime.strptime(date_str.strip(), "%Y-%m-%d").date()
++    boundary = time.max if end_of_day else time.min
++    dt = datetime.combine(parsed, boundary, tzinfo=timezone.utc)
++    return dt.isoformat()
++
++def build_date_filter(
++    field: str,
++    op: str,
++    start_date: str,
++    end_date: str | None = None,
++) -> dict:
++    """Build a Notion API timestamp filter dictionary."""
++    if op == "on_or_after":
++        condition = {"on_or_after": _parse_date_to_iso(start_date, end_of_day=False)}
++    elif op == "on_or_before":
++        condition = {"on_or_before": _parse_date_to_iso(start_date, end_of_day=True)}
++    elif op == "between":
++        if not end_date:
++            raise ValueError("End date is required for a date range.")
++        start_iso = _parse_date_to_iso(start_date, end_of_day=False)
++        end_iso = _parse_date_to_iso(end_date, end_of_day=True)
++        if start_iso > end_iso:
++            raise ValueError("Start date must be on or before end date.")
++        condition = {
++            "on_or_after": start_iso,
++            "on_or_before": end_iso,
++        }
++    else:
++        raise ValueError(f"Unsupported date operator: {op}")
++
++    return {
++        "timestamp": field,
++        field: condition,
++    }
++
++
++def action_search_by_date(db: dict):
++    """Prompt the user for date filter options and display matching pages."""
++    date_choice = pick_from_list(
++        DATE_MODES,
++        label_fn=lambda item: item["label"],
++        key_list="12",
++        prompt="Filter by which date? ",
++    )
++    if not date_choice:
++        return
++
++    range_choice = pick_from_list(
++        RANGE_MODES,
++        label_fn=lambda item: item["label"],
++        key_list="123",
++        prompt="Select date condition: ",
++    )
++    if not range_choice:
++        return
++
++    try:
++        if range_choice["op"] == "between":
++            start_str = click.prompt("Start date (YYYY-MM-DD)")
++            end_str = click.prompt("End date (YYYY-MM-DD)")
++            notion_filter = build_date_filter(
++                date_choice["field"], "between", start_str, end_str
++            )
++        else:
++            target_str = click.prompt("Date (YYYY-MM-DD)")
++            notion_filter = build_date_filter(
++                date_choice["field"], range_choice["op"], target_str
++            )
++    except ValueError as err:
++        click.echo(f"❌ Invalid date input: {err}")
++        return
++
++    click.echo(f"\n🔎 Filtering '{db['name']}' by {date_choice['label']}...")
++
++    try:
++        response = notion.databases.query(
++            database_id=db["id"],
++            filter=notion_filter,
++            sorts=[{"timestamp": date_choice["field"], "direction": "descending"}],
++        )
++    except APIResponseError as err:
++        click.echo(f"❌ Notion Query Error: {err}")
++        return
++
++    all_pages = response.get("results", [])
++    pages = all_pages[: len(KEYS_EXPANDED)]
++
++    if len(all_pages) > len(KEYS_EXPANDED):
++        click.echo(f"⚠️  Showing first {len(KEYS_EXPANDED)} results only.")
++
++    if not pages:
++        click.echo("\nNo pages found matching that date filter.")
++        return
++
++    click.echo(f"\nFound {len(pages)} result(s):\n")
++    browse_pages(pages)
++    """Prompt the user for date filter options and display matching pages."""
++    date_choice = pick_from_list(
++        DATE_MODES,
++        label_fn=lambda item: item["label"],
++        key_list="12",
++        prompt="Filter by which date? ",
++    )
++    if not date_choice:
++        return
++
++    range_choice = pick_from_list(
++        RANGE_MODES,
++        label_fn=lambda item: item["label"],
++        key_list="123",
++        prompt="Select date condition: ",
++    )
++    if not range_choice:
++        return
++
++    try:
++        if range_choice["op"] == "between":
++            start_str = click.prompt("Start date (YYYY-MM-DD)")
++            end_str = click.prompt("End date (YYYY-MM-DD)")
++            notion_filter = build_date_filter(
++                date_choice["field"], "between", start_str, end_str
++            )
++        else:
++            target_str = click.prompt("Date (YYYY-MM-DD)")
++            notion_filter = build_date_filter(
++                date_choice["field"], range_choice["op"], target_str
++            )
++    except ValueError as err:
++        click.echo(f"❌ Invalid date input: {err}")
++        return
++
++    # Replace `query_database(db, filter_obj=notion_filter)` with your client query function
++    click.echo(f"\n🔎 Filtering '{db['name']}' by {date_choice['label']}...")
++    click.echo(f"Filter payload: {notion_filter}")
+\ No newline at end of file

@@ -1,4 +1,4 @@
-# core/navigation.py
+# actions/navigation.py
 """Interactive tag and filter navigation for Notion database searches.
 
 Provides utilities for building hierarchical tag selection interfaces, managing
@@ -12,6 +12,7 @@ import click
 from client import KEYS_EXPANDED, load_tag_hierarchy
 
 from utils.formatting import pick_from_list, pick_multi_from_list
+from utils.date_search import action_search_by_date
 from core.search import perform_notion_search
 from core.database import get_tags_property_name
 

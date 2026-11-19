@@ -5,7 +5,11 @@
 import click
 from client import load_databases
 from actions.crud import action_read, action_create, action_search, action_append
-from actions.navigation import pick_from_list, action_search_multi_tags
+from actions.navigation import (
+    pick_from_list,
+    action_search_multi_tags,
+    action_search_by_date,
+)
 from core.database import show_db_properties
 
 # Constants for shortcut keys
@@ -14,6 +18,7 @@ KEYS = "123456789abcdefghijklmnopqrstuvwxyz"
 COMMANDS = [
     {"label": "Search pages", "fn": action_search},
     {"label": "Search by multiple tags", "fn": action_search_multi_tags},
+    {"label": "Search by created / edited date", "fn": action_search_by_date},
     {"label": "Read page by ID", "fn": action_read},
     {"label": "Create page", "fn": action_create},
     {"label": "Append to page", "fn": action_append},

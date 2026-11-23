@@ -6,10 +6,9 @@ Provides utilities for building Notion API filter objects from subgroup
 definitions and title text, combining multiple filter conditions, and executing
 database queries with comprehensive logging and error handling. Supports
 subgroup-based tag filtering with per-subgroup NOT logic, whole-subgroup
-negation, AND/OR operators between subgroups, and title searches.
+negation, AND/OR operators between subgroups, title searches, and created/edited
+timestamp filters.
 """
-
-# CHQ: Claude rearranged order of imports
 
 import json
 import click
@@ -32,38 +31,44 @@ def _tag_contains(tags_property: str, tag: str) -> dict:
 def _tag_not_contains(tags_property: str, tag: str) -> dict:
     return {"property": tags_property, "multi_select": {"does_not_contain": tag}}
 
+
 def _build_date_filter(date_filter: dict | None) -> dict | None:
     """
     Convert a date filter specification into a Notion timestamp filter object.
 
-    Expected `date_filter` keys:
-      - field: "created_time" | "last_edited_time"
-      - op: "on_or_after" | "on_or_before" | "between"
-      - start: ISO-8601 string (for "on_or_after" and "between")
-      - end: ISO-8601 string (for "on_or_before" and "between")
+    Supports both `prompt_basket_date_filter()` output:
+      {"field": ..., "op": ..., "condition": {...}, "display": ...}
+    and explicit start/end dicts:
+      {"field": ..., "op": ..., "start": "...", "end": "..."}
     """
     if not date_filter:
         return None
 
     field = date_filter["field"]
-    op = date_filter["op"]
+    if field not in {"created_time", "last_edited_time"}:
+        raise ValueError(f"Unsupported Notion timestamp field: {field}")
 
-    if op == "on_or_after":
-        condition = {"on_or_after": date_filter["start"]}
-    elif op == "on_or_before":
-        condition = {"on_or_before": date_filter["end"]}
-    elif op == "between":
-        condition = {
-            "on_or_after": date_filter["start"],
-            "on_or_before": date_filter["end"],
-        }
+    if "condition" in date_filter and date_filter["condition"] is not None:
+        condition = date_filter["condition"]
     else:
-        raise ValueError(f"Unsupported date filter operator: {op}")
+        op = date_filter["op"]
+        if op == "on_or_after":
+            condition = {"on_or_after": date_filter["start"]}
+        elif op == "on_or_before":
+            condition = {"on_or_before": date_filter["end"]}
+        elif op == "between":
+            condition = {
+                "on_or_after": date_filter["start"],
+                "on_or_before": date_filter["end"],
+            }
+        else:
+            raise ValueError(f"Unsupported date filter operator: {op}")
 
     return {
         "timestamp": field,
         field: condition,
     }
+
 
 # ---------------------------------------------------------------------------
 # Subgroup → Notion filter
@@ -75,10 +80,10 @@ def _build_subgroup_filter(sg: dict, tags_property: str) -> dict | None:
     Convert a single subgroup definition into a Notion filter object.
 
     Within a subgroup:
-      - include_tags are OR'd together  (page must contain at least one)
-      - not_tags are AND'd as negations (page must not contain any)
-      - the combined result is then AND'd
-      - if sg['is_not'] is True the whole thing is wrapped in a NOT
+    - include_tags are OR'd together  (page must contain at least one)
+    - not_tags are AND'd as negations (page must not contain any)
+    - the combined result is then AND'd
+    - if sg['is_not'] is True the whole thing is wrapped in a NOT
 
     Returns None if the subgroup has no tags at all.
     """
@@ -124,19 +129,7 @@ def _build_subgroup_chain_filter(
     Build the filter for the entire subgroup chain.
 
     The chain is evaluated left-to-right using the operator_after value of
-    each subgroup (except the last).  For example:
-
-        SG1 AND SG2 OR SG3
-
-    is modelled as a flat list of (filter, operator) pairs and folded into
-    nested Notion AND/OR objects.  Notion's API uses {"and": [...]} and
-    {"or": [...]} at the top level, so we collect consecutive same-operator
-    runs and wrap them accordingly.
-
-    Strategy: fold left.
-      accumulator starts as the first subgroup filter.
-      for each subsequent subgroup, combine accumulator with next filter
-      using the previous subgroup's operator_after.
+    each subgroup (except the last).
     """
     built = []
     for sg in subgroups:
@@ -147,15 +140,11 @@ def _build_subgroup_chain_filter(
     if not built:
         return None
 
-    # Fold left over (filter, operator) pairs
-    # The last operator_after is irrelevant (nothing follows the last group)
     result = built[0][0]
     for i in range(1, len(built)):
         current_filter = built[i][0]
-        # operator connecting result → current is the operator_after of built[i-1]
         op = built[i - 1][1].lower()  # "and" or "or"
         if op == "and":
-            # Flatten into existing AND if possible
             if isinstance(result, dict) and "and" in result:
                 result = {"and": result["and"] + [current_filter]}
             else:
@@ -190,20 +179,15 @@ def build_filters(selected_tag_group: set, tags_property: str) -> list:
         return []
 
     if len(selected_tag_group) == 1:
-        return [_tag_contains(tags_property, list(selected_tag_group)[0])]
+        return [_tag_contains(tags_property, next(iter(selected_tag_group)))]
 
     return [{"and": [_tag_contains(tags_property, tag) for tag in selected_tag_group]}]
 
 
-def build_timestamp_filter(field: str, condition: dict) -> dict:
-    """Build a top-level Notion timestamp filter for created_time or last_edited_time."""
-    if field not in {"created_time", "last_edited_time"}:
-        raise ValueError(f"Unsupported Notion timestamp field: {field}")
-    return {"timestamp": field, field: condition}
-
 # ---------------------------------------------------------------------------
 # Top-level filter builder
 # ---------------------------------------------------------------------------
+
 
 def build_notion_filter(
     selected_tag_group: set,
@@ -238,6 +222,8 @@ def build_notion_filter(
     if len(filters) == 1:
         return filters[0]
     return {"and": filters}
+
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -275,11 +261,13 @@ def log_search_params(
 
     if date_filter:
         label = date_filter.get("display") or (
-            f"{date_filter['field']} ({date_filter['op']})"
+            f"{date_filter['field']} ({date_filter.get('op', 'custom')})"
         )
         click.echo(f"   Date filter: {label}")
 
     click.echo("...")
+
+
 # ---------------------------------------------------------------------------
 # Main search executor
 # ---------------------------------------------------------------------------
@@ -302,6 +290,7 @@ def perform_notion_search(
         subgroups: Subgroup definitions (may be empty).
         title_filter: Text to search for in titles.
         tags_property: Property name for tags.
+        date_filter: Optional dict specifying created_time or last_edited_time filter.
     """
     if not selected_tag_group and not title_filter and not date_filter:
         click.echo("No tags, title, or date filter selected.")

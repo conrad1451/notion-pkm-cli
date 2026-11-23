@@ -460,17 +460,28 @@ def show_basket_menu(selected_tag_group, subgroups, title_filter, date_filter=No
         {"label": "📂 Browse tags / Add more", "action": "continue"},
         {"label": "🔤 Set/Change title filter", "action": "title"},
         {"label": "📅 Set/Change date filter", "action": "date"},
-        {"label": "📦 Organise into subgroups", "action": "subgroups"},
-        {"label": "🗑️  Clear all", "action": "clear"},
-        {"label": "⬅️  Cancel and go back", "action": "cancel"},
     ]
+
+    if date_filter:
+        options.append({"label": "🗓️  Clear date filter", "action": "clear_date"})
+
+    options.extend(
+        [
+            {"label": "📦 Organise into subgroups", "action": "subgroups"},
+            {"label": "🗑️  Clear all", "action": "clear"},
+            {"label": "⬅️  Cancel and go back", "action": "cancel"},
+        ]
+    )
+
+    key_list = "12345678"[: len(options)]
 
     click.echo("\n--- What would you like to do? ---")
     selected_option = pick_from_list(
-        options, label_fn=lambda o: o["label"], key_list="1234567"
+        options, label_fn=lambda o: o["label"], key_list=key_list
     )
 
     return selected_option["action"] if selected_option else "cancel"
+
 # ---------------------------------------------------------------------------
 # Tag navigation (unchanged from original)
 # ---------------------------------------------------------------------------
@@ -569,6 +580,10 @@ def run_selection_loop(tag_hierarchy):
             updated = prompt_basket_date_filter()
             if updated is not None:
                 date_filter = updated
+
+        elif action == "clear_date":
+            date_filter = None
+            click.echo("🗓️  Cleared date filter.")
 
         elif action == "subgroups":
             subgroups = organise_into_subgroups(selected_tag_group, subgroups)

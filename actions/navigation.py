@@ -12,7 +12,7 @@ import click
 from client import KEYS_EXPANDED, load_tag_hierarchy
 
 from utils.formatting import pick_from_list, pick_multi_from_list
-from utils.date_search import action_search_by_date
+from utils.date_search import action_search_by_date, prompt_basket_date_filter
 from core.search import perform_notion_search
 from core.database import get_tags_property_name
 
@@ -432,8 +432,7 @@ def _load_saved_subgroup(subgroups: list[dict], selected_tag_group: set):
 # Basket menu (replaces old toggle)
 # ---------------------------------------------------------------------------
 
-
-def show_basket_menu(selected_tag_group, subgroups, title_filter):
+def show_basket_menu(selected_tag_group, subgroups, title_filter, date_filter=None):
     """Display current selection basket and return the user's chosen action."""
 
     click.echo("\n" + "─" * 40)
@@ -453,10 +452,14 @@ def show_basket_menu(selected_tag_group, subgroups, title_filter):
     if title_filter:
         click.echo(f"  🔤  Title contains: '{title_filter}'")
 
+    if date_filter:
+        click.echo(f"  📅  Date filter: {date_filter['display']}")
+
     options = [
         {"label": "🚀 Search Notion now", "action": "search"},
         {"label": "📂 Browse tags / Add more", "action": "continue"},
         {"label": "🔤 Set/Change title filter", "action": "title"},
+        {"label": "📅 Set/Change date filter", "action": "date"},
         {"label": "📦 Organise into subgroups", "action": "subgroups"},
         {"label": "🗑️  Clear all", "action": "clear"},
         {"label": "⬅️  Cancel and go back", "action": "cancel"},
@@ -464,12 +467,10 @@ def show_basket_menu(selected_tag_group, subgroups, title_filter):
 
     click.echo("\n--- What would you like to do? ---")
     selected_option = pick_from_list(
-        options, label_fn=lambda o: o["label"], key_list="123456"
+        options, label_fn=lambda o: o["label"], key_list="1234567"
     )
 
     return selected_option["action"] if selected_option else "cancel"
-
-
 # ---------------------------------------------------------------------------
 # Tag navigation (unchanged from original)
 # ---------------------------------------------------------------------------
@@ -535,42 +536,39 @@ def get_title_filter_from_user():
 # Main selection loop
 # ---------------------------------------------------------------------------
 
-
 def run_selection_loop(tag_hierarchy):
     """
     The 'Shopping Basket' loop where users build their search criteria,
-    including organising tags into subgroups.
-
-    Args:
-        tag_hierarchy (dict): The structured tag data.
-
-    Returns:
-        tuple: (selected_tag_group, subgroups, title_filter)
-            - selected_tag_group (set): All tags chosen during browsing.
-            - subgroups (list[dict]): Subgroup definitions (may be empty).
-            - title_filter (str): Optional title substring filter.
+    including organising tags into subgroups and filtering by date.
     """
     selected_tag_group: set = set()
     subgroups: list[dict] = []
     title_filter: str = ""
+    date_filter: dict | None = None
 
     is_currently_selecting = True
 
     while is_currently_selecting:
-
-        # while True:
-        action = show_basket_menu(selected_tag_group, subgroups, title_filter)
+        action = show_basket_menu(
+            selected_tag_group, subgroups, title_filter, date_filter
+        )
 
         if action == "cancel":
-            return set(), [], ""
+            return set(), [], "", None
 
         if action == "clear":
             selected_tag_group.clear()
             subgroups.clear()
             title_filter = ""
+            date_filter = None
 
         elif action == "title":
             title_filter = get_title_filter_from_user()
+
+        elif action == "date":
+            updated = prompt_basket_date_filter()
+            if updated is not None:
+                date_filter = updated
 
         elif action == "subgroups":
             subgroups = organise_into_subgroups(selected_tag_group, subgroups)
@@ -587,20 +585,20 @@ def run_selection_loop(tag_hierarchy):
                     click.echo(
                         "   Use '📦 Organise into subgroups' to assign them first."
                     )
-
                 else:
                     is_currently_selecting = False
+            else:
+                is_currently_selecting = False
 
         elif action == "continue":
             navigate_and_select_tags(tag_hierarchy, selected_tag_group)
 
-    return selected_tag_group, subgroups, title_filter
+    return selected_tag_group, subgroups, title_filter, date_filter
 
 
 # ---------------------------------------------------------------------------
 # Top-level CLI action (used by actions/crud.py)
 # ---------------------------------------------------------------------------
-
 
 def action_search_multi_tags(db):
     """CLI Action: Search a database using the hierarchical multi-tag selector."""
@@ -612,13 +610,17 @@ def action_search_multi_tags(db):
     if not tags_property:
         return
 
-    selected_tag_group, subgroups, title_filter = run_selection_loop(tag_hierarchy)
+    selected_tag_group, subgroups, title_filter, date_filter = run_selection_loop(
+        tag_hierarchy
+    )
 
-    if selected_tag_group or title_filter:
+    if selected_tag_group or title_filter or date_filter:
         perform_notion_search(
             db,
             selected_tag_group,
             subgroups,
             title_filter,
             tags_property,
+            date_filter=date_filter,
         )
+ 

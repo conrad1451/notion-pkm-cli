@@ -312,6 +312,68 @@ def perform_notion_search(
         click.echo("⚠️  No filter could be constructed.")
         return
 
+    sorts = None
+    if date_filter and date_filter.get("field") in {"created_time", "last_edited_time"}:
+        sorts = [{"timestamp": date_filter["field"], "direction": "descending"}]
+
+    # CHQ: ClaudeAI made error more specific
+    try:
+        debug(f"tags_property = {tags_property}")
+        debug(f"title_prop = {title_prop}")
+        debug(json.dumps(notion_filter, indent=2))
+        if sorts:
+            debug(f"sorts = {json.dumps(sorts, indent=2)}")
+
+        query_kwargs = {
+            "database_id": db["id"],
+            "filter": notion_filter,
+        }
+        if sorts:
+            query_kwargs["sorts"] = sorts
+
+        response = notion.databases.query(**query_kwargs)
+        results = response.get("results", [])[: len(KEYS_EXPANDED)]
+
+        if not results:
+            click.echo("\nNo pages found matching your criteria.")
+            return
+
+        click.echo(f"\nFound {len(results)} result(s):")
+        browse_pages(results)
+
+    except APIResponseError as e:
+        click.echo(f"❌ Notion Query Error: {e}")
+    """
+    Compiles all filters and executes the Notion database query.
+
+    Args:
+        db: Database config.
+        selected_tag_group: All tags chosen during browsing.
+        subgroups: Subgroup definitions (may be empty).
+        title_filter: Text to search for in titles.
+        tags_property: Property name for tags.
+        date_filter: Optional dict specifying created_time or last_edited_time filter.
+    """
+    if not selected_tag_group and not title_filter and not date_filter:
+        click.echo("No tags, title, or date filter selected.")
+        return
+
+    log_search_params(selected_tag_group, subgroups, title_filter, date_filter)
+
+    title_prop = get_title_property_name(db["id"])
+    notion_filter = build_notion_filter(
+        selected_tag_group,
+        subgroups,
+        title_filter,
+        tags_property,
+        title_prop,
+        date_filter=date_filter,
+    )
+
+    if not notion_filter:
+        click.echo("⚠️  No filter could be constructed.")
+        return
+
     # CHQ: ClaudeAI made error more specific
     try:
         debug(f"tags_property = {tags_property}")
